@@ -1,0 +1,7 @@
+{
+  "targetSubreddit": "formula1",
+  "harvestMode": "post",
+  "targetPostId": null,
+  "postSort": "top",
+  "includeComments": true
+}

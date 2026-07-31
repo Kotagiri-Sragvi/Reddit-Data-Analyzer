@@ -1,0 +1,90 @@
+import { Hono } from 'hono';
+import { serve } from '@hono/node-server';
+import { createServer, getServerPort, reddit } from '@devvit/web/server';
+
+const app: Hono = new Hono();
+
+const TARGET_SUBREDDIT = <NAME_OF_THE_SUBREDDIT>;
+
+app.post('/internal/menu/post-create', async (c) => {
+  console.log(`\n==================== START STREAM HARVEST: r/${TARGET_SUBREDDIT} ====================`);
+
+  const extractedPosts: any[] = [];
+  const extractedComments: any[] = [];
+
+  try {
+    const posts = await reddit.getHotPosts({
+      subredditName: TARGET_SUBREDDIT,
+      limit: 100,
+    }).all();
+
+    for (const post of posts) {
+      extractedPosts.push({
+        "post ID": post.id,
+        "subreddit name": post.subredditName || TARGET_SUBREDDIT,
+        "title": post.title,
+        "body/self-text": post.body || "",
+        "author": post.authorName,
+        "creation timestamp": post.createdAt ? Math.floor(post.createdAt.getTime() / 1000) : 0,
+        "score/upvotes": post.score,
+        "number of comments": post.numberOfComments,
+        "URL/permalink": `https://reddit.com${post.permalink}`
+      });
+
+      if (extractedComments.length < 550 && post.numberOfComments > 0) {
+        try {
+          const comments = await reddit.getComments({
+            postId: post.id,
+            limit: 50,
+          }).all();
+
+          for (const comment of comments) {
+            extractedComments.push({
+              "comment ID": comment.id,
+              "parent post ID": comment.postId,
+              "parent comment ID": comment.parentId,
+              "subreddit": comment.subredditName || TARGET_SUBREDDIT,
+              "comment text": comment.body,
+              "author": comment.authorName,
+              "timestamp": comment.createdAt ? Math.floor(comment.createdAt.getTime() / 1000) : 0,
+              "score/upvotes": comment.score
+            });
+          }
+        } catch (commentError) {
+          // Keep parsing adjacent comment structures smoothly
+        }
+      }
+    }
+
+    // Stream out each individual post entry on its own dedicated line
+    console.log("\n###--- START_POSTS_EXPORT ---###");
+    extractedPosts.forEach((post) => {
+      console.log(`POST_ROW:${JSON.stringify(post)}`);
+    });
+    console.log("###--- END_POSTS_EXPORT ---###\n");
+
+    // Stream out each individual comment entry on its own dedicated line
+    console.log("###--- START_COMMENTS_EXPORT ---###");
+    extractedComments.forEach((comment) => {
+      console.log(`COMMENT_ROW:${JSON.stringify(comment)}`);
+    });
+    console.log("###--- END_COMMENTS_EXPORT ---###\n");
+
+    console.log(`📊 Verification Tally -> Streamed ${extractedPosts.length} Posts & ${extractedComments.length} Comments.`);
+
+  } catch (error) {
+    console.log(`❌ Network extraction failure: ${error}`);
+  }
+
+  console.log(`==================== END STREAM HARVEST: r/${TARGET_SUBREDDIT} ====================\n`);
+
+  return c.json({});
+});
+
+serve({
+  fetch: app.fetch,
+  createServer,
+  port: getServerPort(),
+});
+
+export default app;

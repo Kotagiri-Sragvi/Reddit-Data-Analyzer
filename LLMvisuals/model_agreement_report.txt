@@ -1,0 +1,18 @@
+==================================================================
+               LLM MODEL AGREEMENT AUDIT REPORT                   
+==================================================================
+
+📊 Gaming Posts -> Sentiment Agreement Rate: 57.78% (Sample Window: 45 rows)
+💀 Gaming Posts -> Toxicity Agreement Rate: 77.78% (Sample Window: 45 rows)
+
+📊 Gaming Comments -> Sentiment Agreement Rate: 95.56% (Sample Window: 45 rows)
+💀 Gaming Comments -> Toxicity Agreement Rate: 100.00% (Sample Window: 45 rows)
+
+📊 Smartphones Posts -> Sentiment Agreement Rate: 68.89% (Sample Window: 45 rows)
+💀 Smartphones Posts -> Toxicity Agreement Rate: 93.33% (Sample Window: 45 rows)
+
+📊 Smartphones Comments -> Sentiment Agreement Rate: 60.00% (Sample Window: 45 rows)
+💀 Smartphones Comments -> Toxicity Agreement Rate: 86.67% (Sample Window: 45 rows)
+
+📊 Technology Posts -> Sentiment Agreement Rate: 73.33% (Sample Window: 45 rows)
+💀 Technology Posts -> Toxicity Agreement Rate: 66.67% (Sample Window: 45 rows)

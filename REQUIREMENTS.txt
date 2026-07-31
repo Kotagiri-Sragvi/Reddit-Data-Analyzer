@@ -1,0 +1,21 @@
+REQUIRED LIBRARIES TO BE DOWNLOADED FOR COMPLETETION OF PROJECT:
+- pandas
+- google-generativeai
+- groq
+- python-dotenv
+- matplotlib
+- seaborn
+_________________________________
+
+BUILT-IN LIBRARIES USED FOR COMPLETION OF PROJECT:
+- os
+- time
+- json
+- traceback
+- collections (counter)
+- glob
+_________________________________
+
+FOR DATA EXTRACTION FROM REDDIT USING DEVVIT APP, LIBRARY USED:
+- hono
+[Node.js environment]
