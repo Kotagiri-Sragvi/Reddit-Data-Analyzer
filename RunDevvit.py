@@ -3,6 +3,7 @@ import json
 import os
 import sys
 import subprocess
+import platform
 from pathlib import Path
 from datetime import datetime
 
@@ -22,14 +23,20 @@ def parse_args():
         "-m",
         "--mode",
         type=str,
-        choices=["posts", "comments", "both", "post"],
-        help="Harvest mode: 'posts', 'comments', 'both', or 'post'",
+        choices=["posts", "comments", "both", "post", "comment"],
+        help="Harvest mode: 'posts', 'comments', 'both', 'post', or 'comment'",
     )
     parser.add_argument(
         "-p",
         "--post-id",
         type=str,
         help="Specific post ID (for mode 'post')",
+    )
+    parser.add_argument(
+        "-ci",
+        "--comment-id",
+        type=str,
+        help="Specific comment ID (for mode 'comment')",
     )
     parser.add_argument(
         "-l",
@@ -43,15 +50,22 @@ def parse_args():
         "--comments",
         type=str,
         choices=["y", "n"],
-        help="Include comment section? ('y' or 'n')",
+        help="Include comment section for post? ('y' or 'n')",
+    )
+    parser.add_argument(
+        "-pp",
+        "--parent-post",
+        type=str,
+        choices=["y", "n"],
+        help="Include parent post for comment mode? ('y' or 'n')",
     )
     return parser.parse_args()
 
 
-def get_parameters(args):
+def get_parameters(args=None):
     """Resolve parameters via CLI arguments or interactive prompts."""
     # 1. Subreddit
-    subreddit = args.subreddit
+    subreddit = getattr(args, "subreddit", None) if args else None
     if not subreddit:
         raw_sub = input(
             "\n🎯 Enter Subreddit Target (e.g. technology, formula1) [Default: formula1]: "
@@ -61,26 +75,36 @@ def get_parameters(args):
     subreddit = subreddit.lower().replace("r/", "").strip()
 
     # 2. Harvest Mode
-    mode = args.mode
+    mode = getattr(args, "mode", None) if args else None
     if not mode:
         print("\n📊 Select Harvest Mode:")
         print("  1) posts (bulk)")
         print("  2) comments (bulk)")
         print("  3) both (bulk)")
         print("  4) post (single post)")
-        choice = input("👉 Enter choice (1-4) [Default: 4 - post]: ").strip()
-        mode_map = {"1": "posts", "2": "comments", "3": "both", "4": "post"}
-        mode = mode_map.get(choice, "post")
+        print("  5) comment (single comment + thread context)")
+        choice = input("👉 Enter choice (1-5) [Default: 5 - comment]: ").strip()
+        mode_map = {
+            "1": "posts",
+            "2": "comments",
+            "3": "both",
+            "4": "post",
+            "5": "comment",
+        }
+        mode = mode_map.get(choice, "comment")
 
     harvest_mode = mode.lower().strip()
     target_post_id = None
+    target_comment_id = None
     post_sort = "hot"
     include_comments = False
+    include_parent_post = True
 
     if harvest_mode == "post":
-        # 3. Post ID Selection
-        if args.post_id is not None:
-            raw_id = args.post_id.strip()
+        # Post ID Selection
+        post_id_arg = getattr(args, "post_id", None) if args else None
+        if post_id_arg is not None:
+            raw_id = post_id_arg.strip()
         else:
             raw_id = input(
                 "\n🆔 Enter a specific post ID if available (enter 'n' or press Enter for a random post): "
@@ -90,30 +114,54 @@ def get_parameters(args):
             target_post_id = raw_id
         else:
             target_post_id = None
-
-            # 4. Feed Sort Selection (if no specific Post ID given)
-            if args.sort:
-                post_sort = args.sort.lower().strip()
+            sort_arg = getattr(args, "sort", None) if args else None
+            if sort_arg:
+                post_sort = sort_arg.lower().strip()
             else:
                 print("\n🔥 Select Feed Sort Filter for Random Post Selection:")
-                print("  1) hot")
-                print("  2) top")
-                print("  3) new")
-                print("  4) rising")
+                print("  1) hot\n  2) top\n  3) new\n  4) rising")
                 sort_choice = input("👉 Enter choice (1-4) [Default: 1 - hot]: ").strip()
                 sort_map = {"1": "hot", "2": "top", "3": "new", "4": "rising"}
                 post_sort = sort_map.get(sort_choice, "hot")
 
-        # 5. Comment Section Toggle
-        if args.comments is not None:
-            include_comments = args.comments.lower().strip() == "y"
+        comments_arg = getattr(args, "comments", None) if args else None
+        if comments_arg is not None:
+            include_comments = comments_arg.lower().strip() == "y"
         else:
             raw_comments = input(
                 "💬 Is the comment section to be included? (y/n) [Default: n]: "
             ).strip().lower()
             include_comments = raw_comments in ["y", "yes"]
 
-    return subreddit, harvest_mode, target_post_id, post_sort, include_comments
+    elif harvest_mode == "comment":
+        # Comment ID Selection
+        comment_id_arg = getattr(args, "comment_id", None) if args else None
+        if comment_id_arg is not None:
+            target_comment_id = comment_id_arg.strip()
+        else:
+            target_comment_id = input(
+                "\n🆔 Enter specific Comment ID (e.g. k1abc23 or t1_k1abc23): "
+            ).strip()
+
+        # Parent Post Toggle Selection
+        pp_arg = getattr(args, "parent_post", None) if args else None
+        if pp_arg is not None:
+            include_parent_post = pp_arg.lower().strip() == "y"
+        else:
+            raw_pp = input(
+                "📌 Is the parent post to be included? (y/n) [Default: y]: "
+            ).strip().lower()
+            include_parent_post = raw_pp not in ["n", "no"]
+
+    return (
+        subreddit,
+        harvest_mode,
+        target_post_id,
+        target_comment_id,
+        post_sort,
+        include_comments,
+        include_parent_post,
+    )
 
 
 def save_extracted_data(output_dir, subreddit, harvest_mode, posts, comments):
@@ -150,24 +198,29 @@ def save_extracted_data(output_dir, subreddit, harvest_mode, posts, comments):
     # Save TXT Summary File
     try:
         with txt_path.open("w", encoding="utf-8") as f:
-            f.write(f"=== HARVEST REPORT: r/{subreddit} [{harvest_mode.upper()}] - {timestamp} ===\n\n")
+            f.write(
+                f"=== HARVEST REPORT: r/{subreddit} [{harvest_mode.upper()}] - {timestamp} ===\n\n"
+            )
 
             if posts:
                 f.write("--- POSTS ---\n")
                 for p in posts:
                     f.write(f"[{p.get('post ID')}] {p.get('title')}\n")
                     f.write(
-                        f"Author: {p.get('author')} | Score: {p.get('score/upvotes')} | Comments: {p.get('number of comments')}\n")
+                        f"Author: {p.get('author')} | Score: {p.get('score/upvotes')} | Comments: {p.get('number of comments')}\n"
+                    )
                     f.write(f"URL: {p.get('URL/permalink')}\n")
-                    if p.get('body/self-text'):
+                    if p.get("body/self-text"):
                         f.write(f"Body: {p.get('body/self-text')}\n")
                     f.write("-" * 50 + "\n")
 
             if comments:
                 f.write("\n--- COMMENTS ---\n")
                 for c in comments:
+                    role_badge = f" [{c.get('role').upper()}]" if c.get("role") else ""
                     f.write(
-                        f"[{c.get('comment ID')}] Post: {c.get('parent post ID')} | Author: {c.get('author')} | Score: {c.get('score/upvotes')}\n")
+                        f"[{c.get('comment ID')}]{role_badge} Post: {c.get('parent post ID')} | Author: {c.get('author')} | Score: {c.get('score/upvotes')}\n"
+                    )
                     f.write(f"Text: {c.get('comment text')}\n")
                     f.write("-" * 50 + "\n")
 
@@ -182,18 +235,44 @@ def extract_json_object(line_text, prefix):
     try:
         idx = line_text.find(prefix) + len(prefix)
         raw_json = line_text[idx:].strip()
-        start = raw_json.find('{')
-        end = raw_json.rfind('}')
+        start = raw_json.find("{")
+        end = raw_json.rfind("}")
         if start != -1 and end != -1:
-            clean_json_str = raw_json[start:end + 1]
+            clean_json_str = raw_json[start : end + 1]
             return json.loads(clean_json_str)
     except Exception:
         pass
     return None
 
 
-def launch_devvit():
-    args = parse_args()
+def terminate_process(proc):
+    """Safely and completely terminates the subprocess tree across OS platforms."""
+    if not proc:
+        return
+    try:
+        if platform.system() == "Windows":
+            subprocess.run(
+                f"taskkill /F /T /PID {proc.pid}",
+                shell=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        else:
+            proc.terminate()
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+    except Exception:
+        pass
+
+
+def run_pipeline():
+    initial_args = parse_args()
+    has_cli_args = any(
+        getattr(initial_args, arg) is not None
+        for arg in ["subreddit", "mode", "post_id", "comment_id"]
+    )
 
     base_dir = (
         Path(__file__).resolve().parent
@@ -208,86 +287,135 @@ def launch_devvit():
         print(f"❌ Error: Target folder not found at: '{target_dir}'")
         sys.exit(1)
 
-    subreddit, harvest_mode, target_post_id, post_sort, include_comments = get_parameters(args)
+    first_run = True
 
-    print("=" * 66, flush=True)
-    print("🚀 DEVVIT DATA EXTRACTION LAUNCHER", flush=True)
-    print(f"📁 Target Directory : {target_dir}", flush=True)
-    print(f"🎯 Target Subreddit : r/{subreddit}", flush=True)
-    print(f"📊 Harvest Mode     : {harvest_mode}", flush=True)
-    if harvest_mode == "post":
-        print(f"🆔 Target Post ID   : {target_post_id or f'[Random {post_sort.upper()} Post]'}", flush=True)
-        print(f"💬 Include Comments : {include_comments}", flush=True)
-    print(f"💾 Output Folder    : {output_dir}", flush=True)
-    print("=" * 66, flush=True)
+    while True:
+        process = None
+        captured_posts = []
+        captured_comments = []
 
-    # Inject config into src/server/config.json
-    server_dir = target_dir / "src" / "server"
-    server_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            current_args = initial_args if (first_run and has_cli_args) else None
+            first_run = False
 
-    config_json_path = server_dir / "config.json"
-    config_payload = {
-        "targetSubreddit": subreddit,
-        "harvestMode": harvest_mode,
-        "targetPostId": target_post_id,
-        "postSort": post_sort,
-        "includeComments": include_comments,
-    }
+            (
+                subreddit,
+                harvest_mode,
+                target_post_id,
+                target_comment_id,
+                post_sort,
+                include_comments,
+                include_parent_post,
+            ) = get_parameters(current_args)
 
-    try:
-        with config_json_path.open("w", encoding="utf-8") as f:
-            json.dump(config_payload, f, indent=2)
-        print("⚙️ Updated src/server/config.json successfully.", flush=True)
-    except Exception as e:
-        print(f"⚠️ Warning: Could not write src/server/config.json: {e}", flush=True)
+            print("=" * 66, flush=True)
+            print("🚀 DEVVIT DATA EXTRACTION LAUNCHER", flush=True)
+            print(f"📁 Target Directory : {target_dir}", flush=True)
+            print(f"🎯 Target Subreddit : r/{subreddit}", flush=True)
+            print(f"📊 Harvest Mode     : {harvest_mode}", flush=True)
+            if harvest_mode == "post":
+                print(
+                    f"🆔 Target Post ID   : {target_post_id or f'[Random {post_sort.upper()} Post]'}",
+                    flush=True,
+                )
+                print(f"💬 Include Comments : {include_comments}", flush=True)
+            elif harvest_mode == "comment":
+                print(f"🆔 Target Comment ID: {target_comment_id}", flush=True)
+                print(f"📌 Include Parent Post: {include_parent_post}", flush=True)
+            print(f"💾 Output Folder    : {output_dir}", flush=True)
+            print("=" * 66, flush=True)
 
-    command = "npx devvit playtest"
-    print(f"\n⚡ Executing `{command}`...\n", flush=True)
-    print("-" * 66, flush=True)
+            # Inject config into src/server/config.json
+            server_dir = target_dir / "src" / "server"
+            server_dir.mkdir(parents=True, exist_ok=True)
 
-    captured_posts = []
-    captured_comments = []
+            config_json_path = server_dir / "config.json"
+            config_payload = {
+                "targetSubreddit": subreddit,
+                "harvestMode": harvest_mode,
+                "targetPostId": target_post_id,
+                "targetCommentId": target_comment_id,
+                "postSort": post_sort,
+                "includeComments": include_comments,
+                "includeParentPost": include_parent_post,
+            }
 
-    try:
-        process = subprocess.Popen(
-            command,
-            cwd=target_dir,
-            shell=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            bufsize=1
-        )
+            try:
+                with config_json_path.open("w", encoding="utf-8") as f:
+                    json.dump(config_payload, f, indent=2)
+                print("⚙️ Updated src/server/config.json successfully.", flush=True)
+            except Exception as e:
+                print(f"⚠️ Warning: Could not write src/server/config.json: {e}", flush=True)
 
-        for line in iter(process.stdout.readline, ""):
-            print(line, end="", flush=True)
+            command = "npx devvit playtest"
+            print(f"\n⚡ Executing `{command}`...\n", flush=True)
+            print("-" * 66, flush=True)
 
-            if "POST_ROW:" in line:
-                post_data = extract_json_object(line, "POST_ROW:")
-                if post_data:
-                    captured_posts.append(post_data)
+            process = subprocess.Popen(
+                command,
+                cwd=target_dir,
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
+            )
 
-            elif "COMMENT_ROW:" in line:
-                comment_data = extract_json_object(line, "COMMENT_ROW:")
-                if comment_data:
-                    captured_comments.append(comment_data)
+            for line in iter(process.stdout.readline, ""):
+                print(line, end="", flush=True)
 
-            elif "END STREAM HARVEST" in line:
-                save_extracted_data(output_dir, subreddit, harvest_mode, captured_posts, captured_comments)
-                captured_posts = []
-                captured_comments = []
+                if "POST_ROW:" in line:
+                    post_data = extract_json_object(line, "POST_ROW:")
+                    if post_data:
+                        captured_posts.append(post_data)
 
-        process.wait()
+                elif "COMMENT_ROW:" in line:
+                    comment_data = extract_json_object(line, "COMMENT_ROW:")
+                    if comment_data:
+                        captured_comments.append(comment_data)
 
-    except KeyboardInterrupt:
-        print("\n\n⚠️ Process interrupted by user (Ctrl+C).", flush=True)
-        if captured_posts or captured_comments:
-            save_extracted_data(output_dir, subreddit, harvest_mode, captured_posts, captured_comments)
-    except Exception as e:
-        print(f"\n❌ Execution Error: {e}", flush=True)
+                elif "END STREAM HARVEST" in line:
+                    save_extracted_data(
+                        output_dir,
+                        subreddit,
+                        harvest_mode,
+                        captured_posts,
+                        captured_comments,
+                    )
+                    captured_posts = []
+                    captured_comments = []
+
+                    print("\n🛑 Extraction finished. Stopping Devvit app...", flush=True)
+                    terminate_process(process)
+                    process = None
+                    break
+
+            if process:
+                process.wait()
+                process = None
+
+            print("\n🔄 Ready for the next harvest session (Press Ctrl+C to exit).")
+
+        except KeyboardInterrupt:
+            print("\n\n👋 Pipeline stopped by user (Ctrl+C). Exiting...", flush=True)
+            if process:
+                terminate_process(process)
+            if captured_posts or captured_comments:
+                save_extracted_data(
+                    output_dir,
+                    subreddit,
+                    harvest_mode,
+                    captured_posts,
+                    captured_comments,
+                )
+            sys.exit(0)
+        except Exception as e:
+            print(f"\n❌ Execution Error: {e}", flush=True)
+            if process:
+                terminate_process(process)
 
 
 if __name__ == "__main__":
-    launch_devvit()
+    run_pipeline()

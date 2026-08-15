@@ -1,0 +1,9 @@
+{
+  "targetSubreddit": "formula1",
+  "harvestMode": "post",
+  "targetPostId": null,
+  "targetCommentId": null,
+  "postSort": "hot",
+  "includeComments": true,
+  "includeParentPost": true
+}
