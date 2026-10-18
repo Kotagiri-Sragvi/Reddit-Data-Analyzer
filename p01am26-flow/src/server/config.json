@@ -3,7 +3,7 @@
   "harvestMode": "post",
   "targetPostId": null,
   "targetCommentId": null,
-  "postSort": "hot",
+  "postSort": "new",
   "includeComments": true,
   "includeParentPost": true
 }
