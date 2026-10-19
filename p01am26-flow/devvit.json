@@ -32,7 +32,13 @@
     ]
   },
   "triggers": {
-    "onAppInstall": "/internal/on-app-install"
+    "onAppInstall": "/internal/triggers/app-install",
+    "onAppUpgrade": "/internal/triggers/app-upgrade"
+  },
+  "scheduler": {
+    "tasks": {
+      "tick": { "endpoint": "/internal/cron/tick", "cron": "* * * * *" }
+    }
   },
   "scripts": {
     "dev": "node --experimental-strip-types ./tools/build.ts --watch",

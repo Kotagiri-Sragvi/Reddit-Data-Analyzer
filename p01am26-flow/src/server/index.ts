@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { serve } from '@hono/node-server';
-import { createServer, getServerPort, reddit } from '@devvit/web/server';
+import { createServer, getServerPort, reddit, redis } from '@devvit/web/server';
 // @ts-ignore
 import rawConfig from './config.json';
 
@@ -507,6 +507,31 @@ app.post('/internal/menu/post-create', async (c) => {
     },
   });
 });
+
+const SMOKE_SUB = 'indiaspeaks';
+
+async function smoke(source: string): Promise<void> {
+  const started = Date.now();
+  const fires = Number(await redis.incrBy('smoke:count', 1));
+  console.log(`SMOKE: ${new Date().toISOString()} source=${source} totalFires=${fires}`);
+
+  try {
+    const t = Date.now();
+    const posts = await reddit.getNewPosts({ subredditName: SMOKE_SUB, limit: 100 }).all();
+    const ms = Date.now() - t;
+    const lastPost = posts[posts.length - 1];
+    const oldest = lastPost ? lastPost.createdAt : null;
+    const ageH = oldest ? ((Date.now() - new Date(oldest).getTime()) / 3600000).toFixed(2) : 'n/a';
+    console.log(`SMOKE: r/${SMOKE_SUB} got ${posts.length} posts in ${ms}ms, oldest is ${ageH}h old`);
+  } catch (err) {
+    console.log(`SMOKE: reddit call FAILED: ${err}`);
+  }
+  console.log(`SMOKE: handler finished in ${Date.now() - started}ms`);
+}
+
+app.post('/internal/triggers/app-install', async (c) => { await smoke('onAppInstall'); return c.json({}); });
+app.post('/internal/triggers/app-upgrade', async (c) => { await smoke('onAppUpgrade'); return c.json({}); });
+app.post('/internal/cron/tick', async (c) => { await smoke('cron'); return c.json({}); });
 
 serve({
   fetch: app.fetch,

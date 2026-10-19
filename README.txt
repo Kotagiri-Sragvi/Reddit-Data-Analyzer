@@ -1,5 +1,7 @@
 This folder, P01DA26, represents the Project number 01 in the field of Data Analytics in the year 2026.
 
+NOTE: You need 'hono' library pre-installed using npm.
+
 EXECUTION FLOW:
 1. Get the data, raw data from Devvit's app. This can be achieved by creation of a Devvit app using the CLI and using Node.js for getting the data. (The detailed information is available in the final report)
 2. Saved the direct data into a folder - "ConsoleData/". A python code - "LogParser.py" is used to convert these text files into json files - "{subreddit}RawData.json".
