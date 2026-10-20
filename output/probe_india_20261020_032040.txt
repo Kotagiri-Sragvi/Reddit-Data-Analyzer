@@ -1,0 +1,19 @@
+PROBE: --- Test 1/3: listing depth for r/india (limit 1000, 100 per page) ---
+PROBE: oldest post is 19.29 days old -> about 51.2 posts/day
+PROBE: got 987 posts in 11275ms (about 10 requests)
+PROBE: --- Test 2/3: comment fetch (limit 100) on the 5 busiest recent posts ---
+PROBE: post t3_1x1liz0: reddit reports 799 comments, returned 100 in 2985ms
+PROBE: post t3_1x2e0a9: reddit reports 473 comments, returned 100 in 1532ms
+PROBE: stopped early: time budget reached
+PROBE: post t3_1x4nq0u: reddit reports 469 comments, returned 100 in 1333ms
+PROBE: --- Test 3/3: burst (5 parallel listing calls per round, up to 8 rounds) ---
+PROBE: round 1: 5/5 ok
+PROBE: round 2: 5/5 ok
+PROBE: round 3: 5/5 ok
+PROBE: round 4: 5/5 ok
+PROBE: round 5: 5/5 ok
+PROBE: round 6: 5/5 ok
+PROBE: round 7: 5/5 ok
+PROBE: round 8: 5/5 ok
+PROBE: calls ok=40 failed=0 | latency ms min=345 avg=429 max=530
+PROBE: --- probe complete ---

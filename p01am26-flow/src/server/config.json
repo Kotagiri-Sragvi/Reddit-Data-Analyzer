@@ -1,9 +1,14 @@
 {
-  "targetSubreddit": "formula1",
-  "harvestMode": "post",
+  "runId": "20261019T215302-otdy",
+  "targetSubreddit": "indiaspeaks",
+  "harvestMode": "date_range",
   "targetPostId": null,
   "targetCommentId": null,
-  "postSort": "new",
-  "includeComments": true,
-  "includeParentPost": true
+  "postSort": "hot",
+  "includeComments": false,
+  "includeParentPost": true,
+  "startDate": "2026-06-01",
+  "endDate": "2026-06-01",
+  "commentLimit": 100,
+  "timeBudgetSeconds": 20
 }

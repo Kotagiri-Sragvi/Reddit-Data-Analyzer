@@ -1,0 +1,32 @@
+{
+  "metadata": {
+    "subreddit": "indiaspeaks",
+    "mode": "date_range",
+    "run_id": "20261019T215302-otdy",
+    "start_date_utc": "2026-06-01",
+    "end_date_utc": "2026-06-01",
+    "harvested_at_utc": "2026-10-20T03:30:37+00:00",
+    "timestamp": "20261020_090037",
+    "timezone_note": "All dates are UTC; 'creation timestamp' and 'timestamp' are Unix seconds (UTC).",
+    "total_posts": 0,
+    "total_comments": 0,
+    "duplicates_removed": {
+      "posts": 0,
+      "comments": 0
+    },
+    "coverage_complete": null,
+    "coverage": null,
+    "run_finished": false,
+    "errors": [],
+    "comment_scope": "Comments were not requested.",
+    "comment_limit_per_post": null,
+    "comment_fetch": {
+      "posts_fetched": 0,
+      "comments_reddit_reports": 0,
+      "comments_returned": 0
+    },
+    "posts_with_failed_comment_fetch": []
+  },
+  "posts": [],
+  "comments": []
+}
