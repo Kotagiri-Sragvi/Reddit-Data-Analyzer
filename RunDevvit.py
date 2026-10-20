@@ -10,6 +10,9 @@ Unattended use (any command-line argument => NO prompts, runs once, then exits):
     # several days in ONE run (cheaper than one run per day; split by day later)
     python RunDevvit.py -s india -sd 2026-10-01 -ed 2026-10-18 -c y
 
+    # comments: the WHOLE reply tree of every post (not just top-level comments)
+    python RunDevvit.py -s india -sd 2026-10-18 -c y -cl 2000 -cc 3
+
     # measure what the API really does (listing depth, comment speed, bursts)
     python RunDevvit.py -s indiaspeaks -m probe
 
@@ -50,7 +53,9 @@ DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 SUB_RE = re.compile(r"^[A-Za-z0-9_]{2,21}$")
 EXIT_OK, EXIT_ERROR, EXIT_USAGE, EXIT_INCOMPLETE = 0, 1, 2, 3
 DEFAULT_TIMEOUT_MIN = 120
-DEFAULT_COMMENT_LIMIT = 100
+DEFAULT_COMMENT_LIMIT = 1000
+DEFAULT_CONCURRENCY = 3
+GRACE_SECONDS = 2.0  # keep reading briefly after the END marker: log lines can arrive slightly out of order
 DEFAULT_TIME_BUDGET_S = 20
 
 # Markers printed by the Devvit app, one per line.
@@ -61,6 +66,7 @@ MARKERS = [
     "COVERAGE:",
     "HARVEST_ERROR:",
     "FAILED_POSTS:",
+    "TRUNCATED_POSTS:",
     "PROBE:",
 ]
 
@@ -89,7 +95,8 @@ def parse_args(argv=None):
     p.add_argument("-sd", "--start-date", help="UTC start date, YYYY-MM-DD (date_range)")
     p.add_argument("-ed", "--end-date", help="UTC end date, YYYY-MM-DD (default: same as start date)")
     p.add_argument("-c", "--comments", choices=["y", "n"], help="include comments (default: n)")
-    p.add_argument("-cl", "--comment-limit", type=int, help=f"max comments per post (default {DEFAULT_COMMENT_LIMIT})")
+    p.add_argument("-cl", "--comment-limit", type=int, help=f"max comments per post, counting the whole reply tree, 1-5000 (default {DEFAULT_COMMENT_LIMIT})")
+    p.add_argument("-cc", "--comment-concurrency", type=int, help=f"posts whose comments are fetched at the same time, 1-5 (default {DEFAULT_CONCURRENCY})")
     p.add_argument("-tb", "--time-budget", type=int, help=f"seconds of work per app step, 5-25 (default {DEFAULT_TIME_BUDGET_S})")
     p.add_argument("--timeout", type=int, help=f"give up after this many minutes (default {DEFAULT_TIMEOUT_MIN})")
     p.add_argument("-p", "--post-id", help="specific post ID (mode 'post')")
@@ -150,12 +157,15 @@ def build_params(args, now_utc=None):
         "comment_id": (args.comment_id or "").strip() or None,
         "sort": args.sort or "hot",
         "comment_limit": args.comment_limit if args.comment_limit is not None else DEFAULT_COMMENT_LIMIT,
+        "comment_concurrency": args.comment_concurrency if args.comment_concurrency is not None else DEFAULT_CONCURRENCY,
         "time_budget": args.time_budget if args.time_budget is not None else DEFAULT_TIME_BUDGET_S,
         "timeout_min": args.timeout if args.timeout is not None else DEFAULT_TIMEOUT_MIN,
         "warnings": [],
     }
-    if not 1 <= params["comment_limit"] <= 1000:
-        raise UsageError("--comment-limit must be between 1 and 1000")
+    if not 1 <= params["comment_limit"] <= 5000:
+        raise UsageError("--comment-limit must be between 1 and 5000")
+    if not 1 <= params["comment_concurrency"] <= 5:
+        raise UsageError("--comment-concurrency must be between 1 and 5")
     if not 5 <= params["time_budget"] <= 25:
         raise UsageError("--time-budget must be between 5 and 25 seconds")
     if params["timeout_min"] < 1:
@@ -199,7 +209,7 @@ def prompt_params():
 
     ns = argparse.Namespace(
         subreddit=sub, mode=mode, start_date=None, end_date=None, comments=None, comment_limit=None,
-        time_budget=None, timeout=None, post_id=None, comment_id=None, sort=None, parent_post=None,
+        time_budget=None, timeout=None, comment_concurrency=None, post_id=None, comment_id=None, sort=None, parent_post=None,
     )
     if mode == "date_range":
         while True:
@@ -253,6 +263,7 @@ def write_config(config_path, params, run_id):
         "startDate": params["start_date"],
         "endDate": params["end_date"],
         "commentLimit": params["comment_limit"],
+        "commentConcurrency": params["comment_concurrency"],
         "timeBudgetSeconds": params["time_budget"],
     }
     config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -288,7 +299,7 @@ def terminate_process(proc):
 
 
 def stream_lines(proc, deadline):
-    """Yield output lines; raise StreamTimeout when the wall-clock limit passes."""
+    """Yield output lines (None when idle for a second); raise StreamTimeout at the wall-clock limit."""
     q = queue.Queue()
 
     def reader():
@@ -306,6 +317,7 @@ def stream_lines(proc, deadline):
         try:
             item = q.get(timeout=min(1.0, remaining))
         except queue.Empty:
+            yield None  # heartbeat: lets the consumer apply its own time limits
             continue
         if item is None:
             return
@@ -343,6 +355,8 @@ class Result:
         self.coverage = None
         self.errors = []
         self.failed_posts = []
+        self.truncated_posts = []
+        self.status_counts = {}
         self.probe_lines = []
         self.reported_total = 0
         self.returned_total = 0
@@ -351,11 +365,16 @@ class Result:
         self.timed_out = False
 
 
-def collect(lines, echo=lambda s: print(s, flush=True)):
-    """Consume app output until the END marker. Pure function: easy to test."""
+def collect(lines, echo=lambda s: print(s, flush=True), grace=GRACE_SECONDS):
+    """Consume app output until the END marker (plus a short grace period). Pure: easy to test."""
     r = Result()
+    end_seen_at = None
     try:
         for raw in lines:
+            if raw is None:  # idle heartbeat
+                if end_seen_at is not None and time.time() - end_seen_at >= grace:
+                    break
+                continue
             line = raw.rstrip("\r\n")
             echo(line)
             marker, pos = find_marker(line)
@@ -373,6 +392,8 @@ def collect(lines, echo=lambda s: print(s, flush=True)):
                     r.posts_fetched += 1
                     r.reported_total += int(obj.get("reported", 0) or 0)
                     r.returned_total += int(obj.get("returned", 0) or 0)
+                    status = str(obj.get("status", "complete"))
+                    r.status_counts[status] = r.status_counts.get(status, 0) + 1
             elif marker == "COVERAGE:":
                 obj = parse_json_after(line, marker, pos)
                 if isinstance(obj, dict):
@@ -383,10 +404,16 @@ def collect(lines, echo=lambda s: print(s, flush=True)):
                 obj = parse_json_after(line, marker, pos)
                 if isinstance(obj, list):
                     r.failed_posts = [str(x) for x in obj]
+            elif marker == "TRUNCATED_POSTS:":
+                obj = parse_json_after(line, marker, pos)
+                if isinstance(obj, list):
+                    r.truncated_posts = [x for x in obj if isinstance(x, dict)]
             elif marker == "PROBE:":
                 r.probe_lines.append(line[pos:])
-            if END_MARKER in line:
+            if END_MARKER in line and end_seen_at is None:
                 r.finished = True
+                end_seen_at = time.time()
+            if end_seen_at is not None and time.time() - end_seen_at >= grace:
                 break
     except StreamTimeout:
         r.timed_out = True
@@ -447,9 +474,11 @@ def save_results(output_dir, params, run_id, result):
     }
     if mode == "date_range":
         metadata["comment_scope"] = (
-            f"Up to {params['comment_limit']} comments per post, for posts CREATED inside the window, "
-            f"as they were at harvested_at_utc. Comments written inside the window on OLDER posts are not "
-            f"included; replies written after the window to in-window posts are."
+            f"The whole reply tree (top-level comments AND their replies), up to {params['comment_limit']} "
+            f"comments per post, for posts CREATED inside the window, as they were at harvested_at_utc. "
+            f"Comments written inside the window on OLDER posts are not included; replies written after "
+            f"the window to in-window posts are. Reddit's own comment count includes removed/deleted "
+            f"comments, so a complete thread can legitimately return fewer comments than it reports."
             if params["include_comments"]
             else "Comments were not requested."
         )
@@ -458,7 +487,9 @@ def save_results(output_dir, params, run_id, result):
             "posts_fetched": result.posts_fetched,
             "comments_reddit_reports": result.reported_total,
             "comments_returned": result.returned_total,
+            "posts_by_status": result.status_counts,
         }
+        metadata["posts_with_truncated_comments"] = result.truncated_posts
         metadata["posts_with_failed_comment_fetch"] = result.failed_posts
 
     payload = {"metadata": metadata, "posts": posts, "comments": comments}
@@ -507,6 +538,14 @@ def print_summary(result, params, code):
         print(f"[!] App error: {e}")
     if result.failed_posts:
         print(f"[!] Comments could not be fetched for {len(result.failed_posts)} post(s): {result.failed_posts[:5]}")
+    if result.truncated_posts:
+        by_reason = {}
+        for t in result.truncated_posts:
+            by_reason[t.get("reason", "?")] = by_reason.get(t.get("reason", "?"), 0) + 1
+        print(
+            f"[!] {len(result.truncated_posts)} thread(s) were cut short ({by_reason}); "
+            f"'cap' = raise -cl, 'time' = raise -tb (max 25). Listed in the JSON metadata."
+        )
     if result.coverage is not None:
         c = result.coverage
         if c.get("complete"):
@@ -540,7 +579,7 @@ def run_once(params, base_dir):
     print(f"  mode      : {params['mode']}   run id: {run_id}")
     if params["mode"] == "date_range":
         print(f"  window    : {params['start_date']} -> {params['end_date']} (UTC, whole days)")
-        print(f"  comments  : {'yes, up to ' + str(params['comment_limit']) + ' per post' if params['include_comments'] else 'no'}")
+        print(f"  comments  : {'yes, full reply trees, up to ' + str(params['comment_limit']) + ' per post, ' + str(params['comment_concurrency']) + ' at a time' if params['include_comments'] else 'no'}")
     print(f"  time limit: {params['timeout_min']} min")
     for w in params["warnings"]:
         print(f"  [!] {w}")

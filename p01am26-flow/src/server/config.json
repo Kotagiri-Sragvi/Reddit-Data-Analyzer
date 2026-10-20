@@ -1,14 +1,15 @@
 {
-  "runId": "20261019T215302-otdy",
+  "runId": "20261020T091402-qqpn",
   "targetSubreddit": "indiaspeaks",
   "harvestMode": "date_range",
   "targetPostId": null,
   "targetCommentId": null,
   "postSort": "hot",
-  "includeComments": false,
+  "includeComments": true,
   "includeParentPost": true,
-  "startDate": "2026-06-01",
-  "endDate": "2026-06-01",
-  "commentLimit": 100,
+  "startDate": "2026-10-18",
+  "endDate": "2026-10-18",
+  "commentLimit": 1000,
+  "commentConcurrency": 3,
   "timeBudgetSeconds": 20
 }

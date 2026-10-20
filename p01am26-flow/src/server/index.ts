@@ -34,6 +34,7 @@ interface ConfigPayload {
   startDate?: string | null;
   endDate?: string | null;
   commentLimit?: number;
+  commentConcurrency?: number;
   timeBudgetSeconds?: number;
 }
 
@@ -144,9 +145,16 @@ function getEndDate(): string | null {
   return config.endDate?.trim() || null;
 }
 
+/** Max comments kept per post, counting the WHOLE reply tree (not just top-level comments). */
 function getCommentLimit(): number {
   const n = Math.floor(Number(config.commentLimit));
-  return Number.isFinite(n) && n > 0 ? Math.min(n, 1000) : 100;
+  return Number.isFinite(n) && n > 0 ? Math.min(n, 5000) : 1000;
+}
+
+/** How many posts have their comments fetched at the same time (1-5). */
+function getCommentConcurrency(): number {
+  const n = Math.floor(Number(config.commentConcurrency));
+  return Number.isFinite(n) && n >= 1 ? Math.min(n, 5) : 3;
 }
 
 /** Per-step time budget. Capped at 25 s to stay under the (reported) 30 s request limit. */
@@ -226,6 +234,8 @@ function toCommentRow(c: Comment, sub: string): ExtractedComment {
 //  ORIGINAL harvest modes: posts | comments | both | post | comment
 //  Unchanged from your working version. It was only moved out of the menu
 //  route into this function so that triggers and cron can start it too.
+//  NOTE: these original modes collect TOP-LEVEL comments only (no replies);
+//  use date_range for full reply trees.
 // ======================================================================
 async function runLegacy(): Promise<{ postCount: number; commentCount: number }> {
   const TARGET_SUBREDDIT = getTargetSubreddit();
@@ -635,6 +645,14 @@ interface MatchedPost {
   id: string;
   n: number; // number of comments Reddit reports for the post
   fails?: number;
+  done?: boolean; // comments for this post have been fetched (or given up on)
+}
+
+interface TruncatedPost {
+  id: string;
+  reason: 'cap' | 'time'; // hit the per-post comment cap, or ran out of time
+  returned: number;
+  reported: number;
 }
 
 interface RunState {
@@ -653,8 +671,8 @@ interface RunState {
   oldestScannedMs: number | null;
   // comment progress
   matched: MatchedPost[];
-  commentIdx: number;
   failedPosts: string[];
+  truncated: TruncatedPost[];
   // totals
   postCount: number;
   commentCount: number;
@@ -677,8 +695,8 @@ function newState(runId: string, mode: HarvestMode): RunState {
     exhausted: false,
     oldestScannedMs: null,
     matched: [],
-    commentIdx: 0,
     failedPosts: [],
+    truncated: [],
     postCount: 0,
     commentCount: 0,
     probeStep: 0,
@@ -720,11 +738,57 @@ async function finish(state: RunState): Promise<void> {
   if (state.failedPosts.length > 0) {
     console.log(`FAILED_POSTS:${JSON.stringify(state.failedPosts)}`);
   }
+  if (state.truncated.length > 0) {
+    console.log(`TRUNCATED_POSTS:${JSON.stringify(state.truncated)}`);
+  }
   console.log(
     `📊 Verification Tally -> Streamed ${state.postCount} Post(s) & ${state.commentCount} Comment(s).`
   );
   await flushStdout(60);
   console.log(`==================== END STREAM HARVEST: r/${getTargetSubreddit()} ====================\n`);
+}
+
+// --- Full comment tree. getComments() alone returns ONLY top-level comments; replies hang off
+//     each comment as a nested listing (comment.replies) that has to be walked. ---
+
+interface TreeResult {
+  comments: Comment[];
+  status: 'complete' | 'cap' | 'time';
+}
+
+async function fetchCommentTree(postId: string, cap: number, deadline: number): Promise<TreeResult> {
+  const out: Comment[] = [];
+  const seen = new Set<string>();
+  let status: TreeResult['status'] = 'complete';
+
+  // Returns false when the whole walk must stop (cap reached or out of time).
+  const walk = async (c: Comment): Promise<boolean> => {
+    if (seen.has(c.id)) return true; // Reddit's "load more" can repeat a comment
+    if (out.length >= cap) {
+      status = 'cap';
+      return false;
+    }
+    seen.add(c.id);
+    out.push(c);
+    for await (const reply of c.replies) {
+      if (Date.now() > deadline) {
+        status = 'time';
+        return false;
+      }
+      if (!(await walk(reply))) return false;
+    }
+    return true;
+  };
+
+  const top = reddit.getComments({ postId: postId as `t3_${string}`, pageSize: 100 });
+  for await (const c of top) {
+    if (Date.now() > deadline) {
+      status = 'time';
+      break;
+    }
+    if (!(await walk(c))) break;
+  }
+  return { comments: out, status };
 }
 
 // --- date_range: scan /new newest -> oldest, then fetch comments for matching posts ---
@@ -743,7 +807,7 @@ async function dateRangeStep(state: RunState, deadline: number): Promise<void> {
   if (state.steps === 1) {
     console.log(
       `📅 Window (UTC): ${iso(win.startMs)} -> ${iso(win.endMs)} | comments: ${
-        includeComments ? `yes, up to ${limit} per post` : 'no'
+        includeComments ? `yes, full reply trees, up to ${limit} per post` : 'no'
       }`
     );
   }
@@ -839,43 +903,68 @@ async function dateRangeStep(state: RunState, deadline: number): Promise<void> {
     }
   }
 
-  // ---- Phase 2: comments for the posts found in the window ----
+  // ---- Phase 2: full comment trees for the posts found in the window ----
   if (state.phase === 'comments') {
-    while (state.commentIdx < state.matched.length) {
-      if (Date.now() > deadline - 4000) break; // out of time: continue next tick
-      const m = state.matched[state.commentIdx];
-      if (!m) break;
+    const concurrency = getCommentConcurrency();
+    // Only start a new batch when there is a fair amount of time left. (Never more than
+    // 60% of the budget, so a fresh step can always start one.)
+    const startNeeded = Math.max(3000, Math.min(12000, getTimeBudgetMs() * 0.6));
+    let backOff = false;
 
-      try {
-        const comments = await reddit
-          .getComments({
-            postId: m.id as `t3_${string}`,
-            limit,
-            pageSize: Math.min(limit, 100),
-          })
-          .all();
-        for (const c of comments) {
+    while (!backOff) {
+      const pending = state.matched.filter((m) => !m.done);
+      if (pending.length === 0) break;
+      if (deadline - Date.now() < startNeeded) break; // not enough time: continue next tick
+
+      const batch = pending.slice(0, concurrency);
+      const results = await Promise.allSettled(
+        batch.map((m) => fetchCommentTree(m.id, limit, deadline - 2000))
+      );
+
+      for (let i = 0; i < batch.length; i++) {
+        const m = batch[i];
+        const res = results[i];
+        if (!m || !res) continue;
+
+        if (res.status === 'rejected') {
+          m.fails = (m.fails ?? 0) + 1;
+          console.log(`⚠️ Comments fetch failed for ${m.id} (attempt ${m.fails}/3): ${res.reason}`);
+          if (m.fails >= 3) {
+            state.failedPosts.push(m.id);
+            m.done = true;
+          } else {
+            backOff = true; // try again on the next tick
+          }
+          continue;
+        }
+
+        // A post is committed all at once, so a retried step can never leave half a thread.
+        for (const c of res.value.comments) {
           console.log(`COMMENT_ROW:${JSON.stringify(toCommentRow(c, sub))}`);
           state.commentCount++;
         }
         console.log(
-          `POST_COMMENTS:${JSON.stringify({ id: m.id, reported: m.n, returned: comments.length })}`
+          `POST_COMMENTS:${JSON.stringify({
+            id: m.id,
+            reported: m.n,
+            returned: res.value.comments.length,
+            status: res.value.status,
+          })}`
         );
-        state.commentIdx++;
-      } catch (err) {
-        m.fails = (m.fails ?? 0) + 1;
-        console.log(`⚠️ Comments fetch failed for ${m.id} (attempt ${m.fails}/3): ${err}`);
-        if (m.fails >= 3) {
-          state.failedPosts.push(m.id);
-          state.commentIdx++;
+        if (res.value.status !== 'complete') {
+          state.truncated.push({
+            id: m.id,
+            reason: res.value.status,
+            returned: res.value.comments.length,
+            reported: m.n,
+          });
         }
-        await saveState(state);
-        break; // back off until the next tick
+        m.done = true;
       }
       await saveState(state);
       await flushStdout(20);
     }
-    if (state.commentIdx >= state.matched.length) state.phase = 'done';
+    if (state.matched.every((m) => m.done)) state.phase = 'done';
     await saveState(state);
   }
 
@@ -887,7 +976,7 @@ async function dateRangeStep(state: RunState, deadline: number): Promise<void> {
         phase: state.phase,
         scanned: state.scanned,
         postsFound: state.postCount,
-        commentPostsDone: `${state.commentIdx}/${state.matched.length}`,
+        commentPostsDone: `${state.matched.filter((m) => m.done).length}/${state.matched.length}`,
         commentsStreamed: state.commentCount,
       })}`
     );
@@ -927,25 +1016,36 @@ async function probeStep(state: RunState, deadline: number): Promise<void> {
     await saveState(state);
   }
 
-  // Test 2: how long do comment fetches take, and how many comments come back?
-  if (state.probeStep === 1 && deadline - Date.now() > 8000) {
-    P('--- Test 2/3: comment fetch (limit 100) on the 5 busiest recent posts ---');
-    for (const m of state.matched) {
-      if (Date.now() > deadline - 3000) {
-        P('stopped early: time budget reached');
-        break;
-      }
-      const t = Date.now();
+  // Test 2: top-level comments only (what the old harvester captured) vs the full reply tree
+  if (state.probeStep === 1) {
+    const sample = state.matched.slice(0, 3);
+    if (sample.every((m) => !m.done)) {
+      P('--- Test 2/3: comments, top-level only vs full reply tree (3 busiest recent posts) ---');
+    }
+    for (const m of sample) {
+      if (m.done) continue;
+      if (deadline - Date.now() < 12000) break; // continue on the next tick
       try {
-        const cs = await reddit
+        const t1 = Date.now();
+        const top = await reddit
           .getComments({ postId: m.id as `t3_${string}`, limit: 100, pageSize: 100 })
           .all();
-        P(`post ${m.id}: reddit reports ${m.n} comments, returned ${cs.length} in ${Date.now() - t}ms`);
+        const ms1 = Date.now() - t1;
+        const t2 = Date.now();
+        const tree = await fetchCommentTree(m.id, 1000, deadline - 2000);
+        const ms2 = Date.now() - t2;
+        P(
+          `post ${m.id}: reddit reports ${m.n} | top-level only: ${top.length} (${ms1}ms) | ` +
+            `full reply tree: ${tree.comments.length} (${ms2}ms, ${tree.status})`
+        );
       } catch (err) {
-        P(`post ${m.id}: FAILED after ${Date.now() - t}ms: ${err}`);
+        P(`post ${m.id}: FAILED: ${err}`);
       }
+      m.done = true;
     }
-    state.probeStep = 2;
+    if (sample.every((m) => m.done)) {
+      state.probeStep = 2;
+    }
     await saveState(state);
   }
 
